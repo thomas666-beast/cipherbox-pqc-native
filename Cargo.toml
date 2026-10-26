@@ -1,0 +1,27 @@
+[package]
+name = "cipherbox-pqc-native"
+version = "0.1.0"
+edition = "2024"
+authors = ["Thomas <selfworker112@mailfence.com>"]
+description = "Post-Quantum Cryptography for Servers (ML-KEM, ML-DSA, ChaCha20, Argon2)"
+license = "MIT"
+repository = "https://github.com/yourusername/cipherbox-pqc-native"
+keywords = ["pqc", "cryptography", "cli", "post-quantum", "kyber"]
+categories = ["cryptography", "command-line-utilities"]
+
+[[bin]]
+name = "cipherbox-pqc-verify"
+path = "src/bin/verify.rs"
+
+[[bin]]
+name = "cipherbox-pqc-wrap"
+path = "src/bin/wrap.rs"
+
+[dependencies]
+kyberlib = "0.0.7"
+ml-dsa = "0.0.4"
+rand = "0.8"
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+serde_json = "1.0"
