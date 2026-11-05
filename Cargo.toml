@@ -1,11 +1,11 @@
 [package]
 name = "cipherbox-pqc-native"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Thomas <selfworker112@mailfence.com>"]
 description = "Post-Quantum Cryptography for Servers (ML-KEM, ML-DSA, ChaCha20, Argon2)"
 license = "MIT"
-repository = "https://github.com/yourusername/cipherbox-pqc-native"
+repository = "https://github.com/thomas666-beast/cipherbox-pqc-native"
 keywords = ["pqc", "cryptography", "cli", "post-quantum", "kyber"]
 categories = ["cryptography", "command-line-utilities"]
 
