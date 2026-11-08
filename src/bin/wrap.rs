@@ -1,6 +1,6 @@
+use cipherbox_pqc_native::wrap_room_key_for_user;
 use std::env;
 use std::process;
-use cipherbox_pqc_native::wrap_room_key_for_user;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
