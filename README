@@ -1,0 +1,599 @@
+================================================================================
+                          CIPHERBOX PQC NATIVE
+================================================================================
+
+             Re-exports cipherbox-pqc-core and ships CLI tools:
+             key generation, file encryption and decryption,
+             key wrapping, signature verification, room
+             verifier derivation.
+
+                          Version 0.7.0  |  MIT License
+                          Status: UNAUDITED.
+
+================================================================================
+  TABLE OF CONTENTS
+================================================================================
+
+  1.  What This Crate Is
+  2.  Installation
+  3.  Secret Arguments
+  4.  Key Generation
+  5.  File Encryption and Decryption
+  6.  Key Wrapping and Unwrapping
+  7.  Signature Verification
+  8.  Room Verifier
+  9.  Hybrid Keys
+ 10.  Level Inference
+ 11.  Safety Properties of the CLI Tools
+ 12.  Using the Library Instead of the CLI
+ 13.  Where to Go Next
+
+
+================================================================================
+  1.  WHAT THIS CRATE IS
+================================================================================
+
+cipherbox-pqc-native is the native binding for cipherbox-pqc-core.
+It provides:
+
+  - a re-export of the entire core API, so that Rust applications
+    can use cipherbox-pqc-native and get everything the core crate
+    provides without adding a second dependency;
+
+  - six CLI binaries that wrap the core primitives for shell use;
+
+  - no cryptographic code of its own. Every operation is delegated
+    to cipherbox-pqc-core.
+
+See the top-level README for status, threat model, and what the
+core crate does and does not protect against. Nothing in this
+document replaces that discussion.
+
+The crate is unaudited. The CLI tools are convenient; they are not
+certified. Do not use them to protect anything that matters until
+you have read section 4 of the top-level README.
+
+
+================================================================================
+  2.  INSTALLATION
+================================================================================
+
+Build the binaries:
+
+  cargo build --release
+
+The binaries are produced at:
+
+  target/release/cipherbox-pqc-keygen
+  target/release/cipherbox-pqc-file-encrypt
+  target/release/cipherbox-pqc-file-decrypt
+  target/release/cipherbox-pqc-wrap
+  target/release/cipherbox-pqc-unwrap
+  target/release/cipherbox-pqc-verify
+  target/release/cipherbox-pqc-room-verifier
+
+Install system-wide (optional):
+
+  cargo install --path .
+
+To use the library in another Rust project:
+
+  [dependencies]
+  cipherbox-pqc-native = "0.7"
+
+  // The entire core API is re-exported:
+  use cipherbox_pqc_native::{MlKemKeyPair, room, file};
+
+
+================================================================================
+  3.  SECRET ARGUMENTS
+================================================================================
+
+Commands that take a secret accept three forms:
+
+  file:PATH     Read the secret from a file. The file is read once
+                and its contents are used as the value. This is the
+                recommended form for scripts.
+
+  env:NAME      Read the secret from the named environment variable.
+                This is the recommended form when the caller is
+                another program that can set an environment variable
+                without putting the secret on the command line.
+
+  -             Read the secret from standard input. Useful for
+                piping from a password manager:
+                    keepassxc-cli show ... | cipherbox-pqc-file-decrypt ...
+                Reads until EOF or the first newline, depending on
+                the command (see each command below).
+
+  Plain literal
+
+                A bare string is also accepted. The tool prints a
+                warning to stderr explaining that the secret is now
+                visible in shell history and in /proc. This form
+                exists for interactive use and for tests, not for
+                scripts.
+
+The warning text is:
+
+  warning: secret supplied as a plain literal. It is visible in shell
+  history and in the process list. Use file:PATH, env:NAME, or - instead.
+
+The warning goes to stderr. It does not affect exit codes or stdout.
+
+
+================================================================================
+  4.  KEY GENERATION
+================================================================================
+
+Usage:
+
+  cipherbox-pqc-keygen --out DIR [--hybrid] [--level 768|1024]
+                                  [--passphrase SECRET]
+
+Options:
+
+  --out DIR           Required. The directory to write into.
+                      Created if it does not exist.
+
+  --hybrid            Generate an X25519 + ML-KEM hybrid key pair
+                      instead of a plain ML-KEM key pair.
+
+  --level 768|1024    ML-KEM parameter set. Default is 768.
+
+  --passphrase SECRET Encrypt the secret half with this passphrase
+                      before writing. Accepts the secret forms from
+                      section 3. If omitted, the secret is written
+                      unencrypted with mode 0600.
+
+Plain ML-KEM output:
+
+  DIR/ek.b64               Base64 of the encapsulation key.
+                           1184 bytes decoded for level 768;
+                           1568 bytes decoded for level 1024.
+                           Safe to share.
+
+  DIR/dk_seed.b64          Base64 of the 64-byte seed (d || z).
+                           Secret. Mode 0600.
+                           Written only if --passphrase is not
+                           supplied.
+
+  DIR/dk_seed.enc.b64      Base64 of the passphrase-encrypted seed.
+                           Written only if --passphrase is supplied.
+
+Hybrid output:
+
+  DIR/ek.b64               Base64 of the hybrid public key.
+                           1216 bytes decoded for level 768;
+                           1600 bytes decoded for level 1024.
+                           Safe to share.
+
+  DIR/hk_secret.b64        Base64 of the 34-byte self-describing
+                           secret. Secret. Mode 0600.
+
+  DIR/hk_secret.enc.b64    Base64 of the passphrase-encrypted secret.
+                           Written only if --passphrase is supplied.
+
+The tool never overwrites an existing file. If any output file
+already exists, the command fails before writing anything. To
+regenerate, delete the directory or use a new one.
+
+Example:
+
+  cipherbox-pqc-keygen --out keys --level 1024 --passphrase env:KEYGEN_PASS
+
+  ls -la keys/
+  # ek.b64             mode 0644 (public)
+  # dk_seed.enc.b64    mode 0600 (secret, encrypted)
+
+To decrypt the seed later:
+
+  cipherbox-pqc-file-decrypt file:keys/dk_seed.enc.b64 \
+                             --passphrase env:KEYGEN_PASS \
+                             ciphertext.cbox plaintext.bin
+
+
+================================================================================
+  5.  FILE ENCRYPTION AND DECRYPTION
+================================================================================
+
+Encrypt:
+
+  cipherbox-pqc-file-encrypt <ek_b64> IN OUT [CHUNK_SIZE]
+
+  <ek_b64>       Either a base64-encoded public key, or a secret
+                 argument (section 3) whose contents are base64.
+                 The form file:keys/ek.b64 is the common case.
+
+  IN             Path to the plaintext file. Must exist and be
+                 readable.
+
+  OUT            Path to the ciphertext file. Created or truncated.
+
+  CHUNK_SIZE     Optional. Bytes per chunk. Default 65536.
+                 Minimum 64, maximum 1048576.
+
+  The ML-KEM level and the suite (plain or hybrid) are inferred
+  from the public key length. See section 10.
+
+Decrypt:
+
+  cipherbox-pqc-file-decrypt [SECRET] IN OUT [--passphrase SECRET]
+
+  SECRET         The decapsulation secret. Either:
+                   file:keys/dk_seed.b64        64-byte seed
+                   file:keys/hk_secret.b64      34-byte hybrid secret
+                 The tool detects which one by length.
+                 See section 10.
+
+  IN             Path to the ciphertext file.
+
+  OUT            Path to the plaintext file. See "Atomicity" below.
+
+  --passphrase   If the secret was stored encrypted, pass the
+                 passphrase here. Accepts the forms from section 3.
+
+Atomicity. Decryption writes to a private temporary file in the
+same directory as OUT, and renames it to OUT only after the last
+chunk authenticates. If the ciphertext is truncated, tampered, or
+encrypted to a different key, the temporary file is removed and
+OUT is never created (or, if it already existed, is left
+unchanged).
+
+This is the property that distinguishes cipherbox-pqc-file-decrypt
+from a naive streaming decryptor: a failure leaves no partial
+plaintext on disk. The core crate cannot guarantee this itself —
+it produces the plaintext as it goes — so the CLI takes
+responsibility for the file-system side.
+
+The temporary file is created with mode 0600 and a name derived
+from OUT plus a random suffix. It is removed on error and on
+success after the rename.
+
+Example:
+
+  # Encrypt
+  cipherbox-pqc-file-encrypt file:keys/ek.b64 large.bin large.cbox 262144
+
+  # Decrypt
+  cipherbox-pqc-file-decrypt file:keys/dk_seed.enc.b64 \
+                             large.cbox large.recovered.bin \
+                             --passphrase env:PASS
+
+  # Verify (optional)
+  cmp large.bin large.recovered.bin && echo "roundtrip OK"
+
+Chunk size. Larger chunks are faster but give coarser truncation
+detection. There is no correct answer for every workload. 64 KiB
+to 1 MiB is the range most workloads want; the default (64 KiB)
+is safe.
+
+
+================================================================================
+  6.  KEY WRAPPING AND UNWRAPPING
+================================================================================
+
+Wrap. Encapsulate to a public key, derive an AEAD key from the
+shared secret, encrypt the payload, and emit a self-describing
+JSON blob.
+
+  cipherbox-pqc-wrap <ek_b64> -
+
+  <ek_b64>       Base64-encoded public key, or a secret argument
+                 whose contents are base64. Accepts plain ML-KEM
+                 keys (1184 or 1568 bytes) and hybrid keys
+                 (1216 or 1600 bytes).
+
+  -              The payload to wrap is read from stdin. Reads
+                 until EOF. The payload is not length-limited
+                 beyond what the OS can buffer, but it is a room
+                 key or similar, so it is expected to be short.
+
+Output (stdout, single line):
+
+  {"v":2,"ct":"...","iv":"...","enc_aes":"..."}
+
+The three fields are:
+
+  ct         base64 of the KEM ciphertext
+  iv         base64 of the ChaCha20-Poly1305 nonce
+  enc_aes    base64 of the encrypted payload plus AEAD tag
+
+Unwrap:
+
+  cipherbox-pqc-unwrap [SECRET] <v> <ct> <iv> <enc_aes>
+
+  SECRET         The decapsulation secret. Same forms as
+                 cipherbox-pqc-file-decrypt. Level and suite are
+                 inferred (section 10).
+
+  v              Version number. Read it from the JSON: {"v":2,...}.
+                 Pass 1 to decrypt a legacy v1 blob.
+
+  ct, iv, enc_aes
+                 The three base64 fields from the JSON.
+
+  Plaintext is written to stdout.
+
+Example:
+
+  # Sender: wrap a room key for a recipient.
+  echo -n "room-key-abc-123" | cipherbox-pqc-wrap file:keys/bob_ek.b64 - > wrapped.json
+
+  # Recipient: unwrap.
+  V=$(jq -r .v wrapped.json)
+  CT=$(jq -r .ct wrapped.json)
+  IV=$(jq -r .iv wrapped.json)
+  ENC=$(jq -r .enc_aes wrapped.json)
+
+  cipherbox-pqc-unwrap file:keys/bob_dk_seed.b64 "$V" "$CT" "$IV" "$ENC"
+
+Read the v field. Do not assume. Passing 2 for a legacy v1 blob
+produces a "wrong key or tampered data" error by design.
+
+
+================================================================================
+  7.  SIGNATURE VERIFICATION
+================================================================================
+
+  cipherbox-pqc-verify <vk_b64> <msg_b64> <sig_b64>
+
+  <vk_b64>       Base64 of the verifying key. The parameter set
+                 is inferred from the decoded length:
+                   1952 bytes -> ML-DSA-65
+                   2592 bytes -> ML-DSA-87
+
+  <msg_b64>      Base64 of the message. The message is signed
+                 exactly as the bytes it decodes to; there is no
+                 domain prefix added by this tool.
+
+  <sig_b64>      Base64 of the signature. Length is checked
+                 against the parameter set.
+
+Behaviour:
+
+  Prints "true" and exits 0 if the signature is valid.
+  Prints "false" and exits 1 if the signature is invalid, the
+  key or signature has the wrong length, or the base64 is
+  malformed.
+
+  There is no case in which the tool panics on malformed input.
+
+Example:
+
+  VK=$(base64 -w0 verifying_key.bin)
+  MSG=$(echo -n "the message" | base64 -w0)
+  SIG=$(base64 -w0 signature.bin)
+
+  cipherbox-pqc-verify "$VK" "$MSG" "$SIG" && echo "valid" || echo "invalid"
+
+
+================================================================================
+  8.  ROOM VERIFIER
+================================================================================
+
+  cipherbox-pqc-room-verifier <auth_token_b64>
+
+  <auth_token_b64>
+                 Base64 of the 32-byte auth token from a
+                 secret-derived room. Produced by
+                 RoomSecret::auth_token() in the core crate.
+
+Output (stdout): the 32-byte verifier, base64-encoded.
+
+The verifier is what a server should store. The flow:
+
+  1. Client derives a room secret from shared sources (a
+     passphrase, a photo hash, whatever the room agrees on).
+
+  2. Client computes auth_token = H("auth", root) and tells the
+     server:
+       - room_id   (safe to publish)
+       - verifier  (on room creation)
+
+  3. Server stores { room_id -> verifier } and nothing else. No
+     secret, no member list, no keys.
+
+  4. On every subsequent request, client sends auth_token. Server
+     computes room_auth_verifier(auth_token) and compares against
+     the stored verifier. If they match, the client is a member
+     of the room.
+
+The server cannot derive the secret from either the token or the
+verifier. The token is a bearer credential: whoever has it can
+act as a member. Do not log it.
+
+Rust servers can skip the CLI and call the core function directly:
+
+  use cipherbox_pqc_native::room;
+
+  let verifier = room::auth_verifier(&auth_token);
+  // or, if you have the room secret:
+  let verifier = room::auth_verifier(&secret.auth_token());
+
+The CLI exists for servers written in other languages, or for
+shell scripts that populate a database.
+
+
+================================================================================
+  9.  HYBRID KEYS
+================================================================================
+
+A hybrid key pair combines X25519 and ML-KEM. It is secure if
+either holds. Generation:
+
+  cipherbox-pqc-keygen --out keys --hybrid
+
+Output:
+
+  keys/ek.b64             1216 or 1600 bytes, base64. Share this.
+  keys/hk_secret.b64      34 bytes, base64. Secret. Encrypt with
+                          --passphrase before storing.
+
+Every tool that accepts a public key accepts a hybrid public key:
+
+  cipherbox-pqc-file-encrypt file:keys/ek.b64 in.bin out.cbox
+  cipherbox-pqc-wrap         file:keys/ek.b64 -
+
+Every tool that accepts a secret accepts a hybrid secret:
+
+  cipherbox-pqc-file-decrypt file:keys/hk_secret.b64 in.cbox out.bin
+  cipherbox-pqc-unwrap       file:keys/hk_secret.b64 2 ...
+
+The tool detects a hybrid secret by its length (34 bytes decoded)
+versus a plain ML-KEM seed (64 bytes decoded). You do not need to
+tell it which is which.
+
+A file encrypted to a hybrid key cannot be decrypted with a plain
+ML-KEM key of the same level, and vice versa. The decryptor
+enforces this at the file header check and exits with a specific
+error.
+
+
+================================================================================
+ 10.  LEVEL INFERENCE
+================================================================================
+
+You never tell the CLI tools which ML-KEM level you are using.
+They infer it from the data:
+
+  Encrypting and wrapping.
+      From the decoded public key length:
+        1184  -> ML-KEM-768
+        1568  -> ML-KEM-1024
+        1216  -> X25519 + ML-KEM-768
+        1600  -> X25519 + ML-KEM-1024
+      Any other length is rejected with an error.
+
+  Decrypting a file.
+      From the file header (see top-level README section 8).
+      A single seed can decrypt files at either level; the file
+      itself records which was used.
+
+  Unwrapping a wrapped key.
+      From the KEM ciphertext size:
+        1088  -> ML-KEM-768
+        1568  -> ML-KEM-1024
+        1120  -> X25519 + ML-KEM-768
+        1600  -> X25519 + ML-KEM-1024
+
+  Verifying a signature.
+      From the verifying-key length:
+        1952  -> ML-DSA-65
+        2592  -> ML-DSA-87
+
+The only place this is not automatic is keygen, where --level is
+required to choose which key pair to generate.
+
+
+================================================================================
+ 11.  SAFETY PROPERTIES OF THE CLI TOOLS
+================================================================================
+
+These are properties of the CLI binaries, not of the core library.
+
+Keygen never overwrites.
+      If any output file exists, the command fails before writing
+      anything. Partial key generation is not possible.
+
+Keygen writes secrets with mode 0600.
+      The secret file is readable only by the owner. The public
+      key file is mode 0644. This is enforced on Unix; on Windows
+      the standard file ACL is used.
+
+File-decrypt is atomic.
+      Decryption writes to a private temporary file and renames
+      it to the output path only after the last chunk
+      authenticates. A failed or truncated decryption leaves no
+      output file. If the output path already existed, its
+      previous contents are untouched.
+
+File-decrypt uses a private temporary.
+      The temporary file is created with mode 0600 and a name
+      that cannot be predicted by another process. It is removed
+      on both success (after rename) and failure.
+
+Secrets are not echoed.
+      The warning printed for plain-literal secrets goes to
+      stderr and does not include the secret itself. The tools
+      do not print secrets to stdout unless the command's purpose
+      is to produce them (e.g. unwrap writes plaintext to
+      stdout).
+
+Verify never panics.
+      cipherbox-pqc-verify on malformed base64, wrong-length key,
+      wrong-length signature, or an invalid signature prints
+      "false" and exits 1. There is no input that causes a panic
+      in that binary.
+
+Exit codes.
+      0 on success.
+      1 on any failure, including a signature that does not
+      verify (which is a valid outcome of a verification, not a
+      tool error).
+
+
+================================================================================
+ 12.  USING THE LIBRARY INSTEAD OF THE CLI
+================================================================================
+
+Every CLI tool is a thin wrapper. If you are writing a Rust
+program, call the library directly.
+
+  use cipherbox_pqc_native::{
+      MlKemKeyPair, HybridKeyPair,
+      file, room,
+      encapsulate_to, wrap_key, unwrap_key,
+  };
+
+  // Key generation.
+  let kp = MlKemKeyPair::new()?;
+  let (seed, ek) = kp.export_keys();
+
+  // File encryption.
+  let ct = file::encrypt_file(plaintext, &ek, 65536)?;
+  let pt = file::decrypt_file(&ct, kp.decapsulation_key())?;
+
+  // Key wrapping.
+  let blob = wrap_key(&ek, b"room-key")?;
+  let room_key = unwrap_key(&kp, &blob)?;
+
+  // Room verifier.
+  let verifier = room::auth_verifier(&auth_token);
+
+Everything the CLI does is one library call away. The CLI adds:
+secret argument parsing, base64 encoding and decoding, atomic
+file writes, and consistent exit codes. If you have written a
+Rust program, you probably want to do those things yourself.
+
+The full API surface of the core crate is re-exported. See the
+core crate's README and USER_GUIDE.md for the complete reference.
+
+
+================================================================================
+ 13.  WHERE TO GO NEXT
+================================================================================
+
+Read the top-level README section 4 before using any of these
+tools to protect anything that matters. It describes the trust
+barriers (unaudited, not ACVP-validated) and the threat-model
+boundaries (no constant-time analysis on the compiled binary).
+
+Read the core crate's USER_GUIDE.md for the library API. Every
+section of that guide has a direct counterpart in this crate's
+re-export surface.
+
+If you need an audited tool for the same operations, the
+RustCrypto ml-kem crate and the ml-dsa crate both provide
+wasm-compatible and native-compatible APIs, and both have been
+independently assessed.
+
+
+================================================================================
+  LICENSE
+================================================================================
+
+MIT. See LICENSE file for the full text.
+
+Repository: https://github.com/thomas666-beast/cipherbox-pqc-native
+Author:     Thomas <selfworker112@mailfence.com>

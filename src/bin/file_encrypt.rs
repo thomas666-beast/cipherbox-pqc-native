@@ -1,14 +1,51 @@
-use base64::{engine::general_purpose, Engine as _};
-use cipherbox_pqc_core::file::{FileEncryptor, CHUNK_SIZE_DEFAULT};
-use cipherbox_pqc_core::kem;
+use base64::{Engine as _, engine::general_purpose};
+use cipherbox_pqc_native::cli::AtomicOutput;
+use cipherbox_pqc_native::file::{CHUNK_SIZE_DEFAULT, FileEncryptor};
+use cipherbox_pqc_native::validate_public_key;
 use std::env;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::process;
 
-fn fail(msg: impl std::fmt::Display) -> ! {
-    eprintln!("error: {msg}");
-    process::exit(1);
+// All work happens in `run` so destructors (temp-file cleanup) execute
+// before `main` calls `process::exit`.
+fn run(args: &[String]) -> Result<(), String> {
+    let pk_bytes = general_purpose::STANDARD
+        .decode(args[1].trim())
+        .map_err(|e| format!("invalid pk b64: {e}"))?;
+    // Accepts plain ML-KEM (1184/1568 B) and hybrid (1216/1600 B) public keys.
+    validate_public_key(&pk_bytes).map_err(|e| e.to_string())?;
+
+    let chunk_size = if args.len() == 5 {
+        args[4]
+            .parse::<usize>()
+            .map_err(|e| format!("invalid chunk_size: {e}"))?
+    } else {
+        CHUNK_SIZE_DEFAULT
+    };
+
+    let mut input = File::open(&args[2]).map_err(|e| format!("open input: {e}"))?;
+    let mut output =
+        AtomicOutput::create(&args[3], false).map_err(|e| format!("create output: {e}"))?;
+    let mut enc = FileEncryptor::new(&pk_bytes, chunk_size).map_err(|e| e.to_string())?;
+
+    let mut buf = vec![0u8; chunk_size];
+    let mut out_buf = Vec::with_capacity(chunk_size + 32);
+    loop {
+        let n = input.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        out_buf.clear();
+        enc.update(&buf[..n], &mut out_buf).map_err(|e| e.to_string())?;
+        if !out_buf.is_empty() {
+            output.write_all(&out_buf).map_err(|e| format!("write: {e}"))?;
+        }
+    }
+    out_buf.clear();
+    enc.finish(&mut out_buf).map_err(|e| e.to_string())?;
+    output.write_all(&out_buf).map_err(|e| format!("write: {e}"))?;
+    output.commit().map_err(|e| format!("finalize output: {e}"))
 }
 
 fn main() {
@@ -20,53 +57,8 @@ fn main() {
         );
         process::exit(1);
     }
-
-    let pk_bytes = general_purpose::STANDARD
-        .decode(&args[1])
-        .unwrap_or_else(|e| fail(format!("invalid pk b64: {e}")));
-    if pk_bytes.len() != kem::EK_BYTES {
-        fail(format!(
-            "public key must be {} bytes, got {}",
-            kem::EK_BYTES,
-            pk_bytes.len()
-        ));
+    if let Err(e) = run(&args) {
+        eprintln!("error: {e}");
+        process::exit(1);
     }
-    let mut ek = [0u8; kem::EK_BYTES];
-    ek.copy_from_slice(&pk_bytes);
-
-    let chunk_size = if args.len() == 5 {
-        args[4]
-            .parse::<usize>()
-            .unwrap_or_else(|e| fail(format!("invalid chunk_size: {e}")))
-    } else {
-        CHUNK_SIZE_DEFAULT
-    };
-
-    let mut input = File::open(&args[2]).unwrap_or_else(|e| fail(format!("open input: {e}")));
-    let mut output = File::create(&args[3]).unwrap_or_else(|e| fail(format!("create output: {e}")));
-
-    let mut enc = FileEncryptor::new(&ek, chunk_size).unwrap_or_else(|e| fail(e));
-
-    let mut buf = vec![0u8; chunk_size];
-    let mut out_buf = Vec::with_capacity(chunk_size + 32);
-    loop {
-        let n = match input.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => fail(format!("read: {e}")),
-        };
-        out_buf.clear();
-        enc.update(&buf[..n], &mut out_buf).unwrap_or_else(|e| fail(e));
-        if !out_buf.is_empty() {
-            output
-                .write_all(&out_buf)
-                .unwrap_or_else(|e| fail(format!("write: {e}")));
-        }
-    }
-    out_buf.clear();
-    enc.finish(&mut out_buf).unwrap_or_else(|e| fail(e));
-    output
-        .write_all(&out_buf)
-        .unwrap_or_else(|e| fail(format!("write: {e}")));
-    process::exit(0);
 }
